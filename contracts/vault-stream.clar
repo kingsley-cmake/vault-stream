@@ -182,3 +182,110 @@
     (ok true)
   )
 )
+
+;; YIELD CALCULATION ENGINE
+
+(define-read-only (calculate-yield
+    (protocol-id uint)
+    (user principal)
+  )
+  (let (
+      (protocol (unwrap! (map-get? supported-protocols { protocol-id: protocol-id })
+        ERR-INVALID-PROTOCOL
+      ))
+      (user-deposit (unwrap!
+        (map-get? user-deposits {
+          user: user,
+          protocol-id: protocol-id,
+        })
+        ERR-INSUFFICIENT-FUNDS
+      ))
+      (blocks-since-deposit (- stacks-block-height (get deposit-time user-deposit)))
+      (annual-yield (/ (* (get base-apy protocol) (get amount user-deposit)) BASE-DENOMINATION))
+    )
+    ;; Validation
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+
+    ;; Time-weighted yield calculation
+    (ok (/ (* annual-yield blocks-since-deposit) BLOCKS-PER-YEAR))
+  )
+)
+
+;; USER WITHDRAWAL OPERATIONS
+
+(define-public (withdraw
+    (protocol-id uint)
+    (amount uint)
+  )
+  (let (
+      (user-deposit (unwrap!
+        (map-get? user-deposits {
+          user: tx-sender,
+          protocol-id: protocol-id,
+        })
+        ERR-INSUFFICIENT-FUNDS
+      ))
+      (yield (unwrap! (calculate-yield protocol-id tx-sender) ERR-WITHDRAWAL-FAILED))
+      (current-protocol-deposits (default-to { total-deposit: u0 }
+        (map-get? protocol-total-deposits { protocol-id: protocol-id })
+      ))
+    )
+    ;; Input validation
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit-amount amount) ERR-INVALID-INPUT)
+    (asserts! (>= (get amount user-deposit) amount) ERR-INSUFFICIENT-FUNDS)
+
+    ;; Update user position
+    (map-set user-deposits {
+      user: tx-sender,
+      protocol-id: protocol-id,
+    } {
+      amount: (- (get amount user-deposit) amount),
+      deposit-time: stacks-block-height,
+    })
+
+    ;; Update protocol TVL
+    (map-set protocol-total-deposits { protocol-id: protocol-id } { total-deposit: (- (get total-deposit current-protocol-deposits) amount) })
+
+    ;; Return principal plus accrued yield
+    (ok (+ amount yield))
+  )
+)
+
+;; RISK MANAGEMENT FUNCTIONS
+
+(define-public (deactivate-protocol (protocol-id uint))
+  (begin
+    ;; Authorization check
+    (asserts! (is-contract-owner tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+
+    ;; Deactivate protocol
+    (map-set supported-protocols { protocol-id: protocol-id }
+      (merge
+        (unwrap! (map-get? supported-protocols { protocol-id: protocol-id })
+          ERR-INVALID-PROTOCOL
+        ) { active: false }
+      ))
+
+    ;; Update active protocol counter
+    (var-set total-protocols (- (var-get total-protocols) u1))
+    (ok true)
+  )
+)
+
+;; PROTOCOL INITIALIZATION
+
+(define-public (initialize-protocols)
+  (begin
+    ;; Initialize default yield strategies
+    (try! (add-protocol u1 "StacksVault Prime" u500 u20)) ;; 5.00% APY, 20% allocation
+    (try! (add-protocol u2 "Lightning Liquidity Pool" u750 u30)) ;; 7.50% APY, 30% allocation
+    (ok true)
+  )
+)
+
+;; CONTRACT INITIALIZATION
+
+;; Initialize the protocol with default strategies
+(try! (initialize-protocols))
